@@ -75,6 +75,7 @@ import com.encasaxo.hq.network.dto.UpdateItem
 import com.encasaxo.hq.network.dto.BoxItemUpdate
 import com.encasaxo.hq.network.dto.CreatePackingListBody
 import com.encasaxo.hq.network.dto.PackingForm
+import com.squareup.moshi.Moshi
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.LinearProgressIndicator
@@ -438,6 +439,8 @@ fun ScanModeScreen(packingListId: String, onBack: () -> Unit) {
     var lastSize by rememberSaveable { mutableStateOf("") }
     var lastPackOf by rememberSaveable { mutableStateOf(0) }
     val stagedBoxes = remember { mutableStateMapOf<Int, Int>() } // boxNo -> qty to add/update
+    val moshi = remember { Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build() }
+    val appContext = LocalContext.current.applicationContext
 
     // Fetch shipment_id to display instead of internal id
     LaunchedEffect(packingListId) {
@@ -669,18 +672,22 @@ fun ScanModeScreen(packingListId: String, onBack: () -> Unit) {
                                 }
 
                                 val updBody = UpdatePackingListBody(items = listOf(updateItem), cartonDetails = emptyList())
-                                val updResp = repository.update(packingListId, updBody)
-                                if (updResp.isSuccessful) {
-                                    result = "Saved ${stagedBoxes.size} box(es). Total $total"
-                                    stagedBoxes.clear()
-                                    // Reactivate scan mode for the next item
-                                    showScanner = true
-                                    code = ""
-                                    qtyText = ""
-                                    boxNoText = ""
-                                } else {
-                                    result = "Save failed: ${updResp.code()}"
-                                }
+                                // Enqueue instead of direct network call
+                                val adapter = moshi.adapter(UpdatePackingListBody::class.java)
+                                val payloadJson = adapter.toJson(updBody)
+                                val qm = com.encasaxo.hq.data.QueueManager(appContext, moshi)
+                                qm.enqueue(com.encasaxo.hq.data.QueuedUpdate(packingListId = packingListId, payloadJson = payloadJson, payloadType = "full"))
+                                result = "Queued. You can continue scanning."
+                                stagedBoxes.clear()
+                                // Reactivate scan mode for the next item
+                                showScanner = true
+                                code = ""
+                                qtyText = ""
+                                boxNoText = ""
+                                // Schedule worker
+                                androidx.work.WorkManager.getInstance(appContext)
+                                    .enqueue(androidx.work.OneTimeWorkRequestBuilder<com.encasaxo.hq.data.UpdateWorker>()
+                                        .build())
                             } catch (e: Exception) {
                                 result = "Save error: ${e.message}"
                             }
